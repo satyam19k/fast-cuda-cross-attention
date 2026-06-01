@@ -48,8 +48,15 @@ try:
     cudart.cudaMemset.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
     cudart.cudaMemset.restype = ctypes.c_int
 
+    cudart.cudaDeviceGetAttribute.argtypes = [
+        ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int
+    ]
+    cudart.cudaDeviceGetAttribute.restype = ctypes.c_int
+
     cudaMemcpyHostToDevice = 1
     cudaMemcpyDeviceToHost = 2
+    # cudaDevAttrMaxSharedMemoryPerBlockOptin
+    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
 
 except Exception as e:
     raise RuntimeError(f"Failed to load CUDA runtime: {e}")
@@ -110,6 +117,31 @@ lib.launch_optimized_kernel.argtypes = [
     ctypes.c_void_p
 ]
 lib.launch_optimized_kernel.restype = None
+
+class DesignLimited(RuntimeError):
+    """Raised when a kernel cannot run a config by design (not a bug).
+
+    Used by the warp-parallel kernel: it materializes the full score row in
+    shared memory, so N_input is capped by the device's per-block shared-memory
+    limit. Beyond that we skip cleanly and the benchmark records the config as
+    'design-limited' -- which is itself the Perceiver-scaling result.
+    """
+
+
+def _max_smem_optin(device=0):
+    """Device max opt-in dynamic shared memory per block, in bytes."""
+    val = ctypes.c_int(0)
+    err = cudart.cudaDeviceGetAttribute(
+        ctypes.byref(val), cudaDevAttrMaxSharedMemoryPerBlockOptin, device)
+    if err != 0 or val.value <= 0:
+        return 48 * 1024  # conservative default (static smem limit)
+    return val.value
+
+
+def warp_smem_bytes(N_input):
+    """Shared memory the warp kernel needs for a given N_input."""
+    return (4 * N_input + 4) * 4
+
 
 def _allocate_gpu_memory(size_bytes):
     """Allocate GPU memory."""
@@ -213,7 +245,19 @@ def run_naive_kernel(Q, K, V, N_latent, N_input, D):
     return _run_kernel(lib.launch_naive_kernel, Q, K, V, batch_size, N_latent, N_input, D)
 
 def run_warp_parallel_kernel(Q, K, V, N_latent, N_input, D):
-    """Run warp-parallel CUDA kernel (warp-level cooperation)."""
+    """Run warp-parallel CUDA kernel (warp-level cooperation).
+
+    Raises DesignLimited when N_input exceeds what fits in the device's
+    per-block shared memory -- the warp kernel materializes the full score row,
+    so this is a hard design limit, not a failure.
+    """
+    needed = warp_smem_bytes(N_input)
+    avail = _max_smem_optin()
+    if needed > avail:
+        raise DesignLimited(
+            f"warp kernel needs {needed/1024:.1f} KB shared memory for "
+            f"N_input={N_input} but device allows {avail/1024:.1f} KB/block "
+            f"(materializes full score row; use tiled/vectorized instead)")
     if len(Q.shape) == 3:
         batch_size = Q.shape[0]
     else:
