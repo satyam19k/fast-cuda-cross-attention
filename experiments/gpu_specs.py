@@ -33,6 +33,17 @@ GPU_SPECS = {
         "peak_fp8_tc_flops": 362.0 * TFLOP,
         "peak_bw_bytes": 864.0 * GBs,
     },
+    # L40S (Ada, AD102). 142 SM. ~864 GB/s. ~100 KB smem/SM. L2 = 96 MB.
+    # Higher clocks than L40 -> higher tensor throughput.
+    "L40S": {
+        "arch": "Ada",
+        "sm_count": 142,
+        "smem_per_sm_kb": 100,
+        "peak_fp32_flops": 91.6 * TFLOP,
+        "peak_fp16_tc_flops": 362.0 * TFLOP,   # FP16 tensor, no sparsity
+        "peak_fp8_tc_flops": 733.0 * TFLOP,
+        "peak_bw_bytes": 864.0 * GBs,
+    },
     # H200 (Hopper, GH100). 132 SM. ~4.8 TB/s. ~228 KB smem/SM.
     "H200": {
         "arch": "Hopper",
@@ -54,21 +65,43 @@ PRECISION_PEAK_KEY = {
 }
 
 
-def detect_gpu_name():
-    """Best-effort GPU key from torch; returns None off-GPU.
-
-    Maps the torch device name onto one of the GPU_SPECS keys.
-    """
+def raw_gpu_name():
+    """Raw device name via nvidia-smi (no torch); None if unavailable."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            first = out.stdout.strip().splitlines()
+            if first:
+                return first[0].strip()
+    except Exception:
+        pass
+    # fall back to torch if it happens to be present
     try:
         import torch
-        if not torch.cuda.is_available():
-            return None
-        name = torch.cuda.get_device_name(0)
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
     except Exception:
+        pass
+    return None
+
+
+def detect_gpu_name():
+    """GPU_SPECS key for the current device, or None if unknown/off-GPU.
+
+    Uses nvidia-smi first (no torch dependency). L40S is checked before L40
+    since 'L40S' contains 'L40'.
+    """
+    name = raw_gpu_name()
+    if not name:
         return None
     upper = name.upper()
     if "4070" in upper:
         return "4070"
+    if "L40S" in upper:
+        return "L40S"
     if "L40" in upper:
         return "L40"
     if "H200" in upper:

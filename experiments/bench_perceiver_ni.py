@@ -61,7 +61,7 @@ def main():
     import numpy as np
     import roofline
     import csvlog
-    from gpu_specs import detect_gpu_name
+    from gpu_specs import detect_gpu_name, raw_gpu_name
     try:
         import cuda_wrappers
         from cuda_wrappers import benchmark_kernel_events, DesignLimited
@@ -70,12 +70,10 @@ def main():
         print("Build them first on the GPU box:  make")
         return
 
-    try:
-        import torch
-        gpu = detect_gpu_name() or (torch.cuda.get_device_name(0)
-                                    if torch.cuda.is_available() else "unknown")
-    except Exception:
-        gpu = "unknown"
+    # torch-free GPU detection (nvidia-smi). detect_gpu_name() returns a
+    # GPU_SPECS key for %-peak math; if the card is unknown we still record its
+    # raw name so the CSV is labeled.
+    gpu = detect_gpu_name() or raw_gpu_name() or "unknown"
 
     nl, B = args.n_latent, args.batch
     csv_path = os.path.join(ROOT, args.csv)
