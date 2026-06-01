@@ -132,6 +132,19 @@ lib.launch_optimized_kernel.argtypes = [
 ]
 lib.launch_optimized_kernel.restype = None
 
+# WMMA (fp16 tensor-core) kernel: half* Q/K/V (passed as void*), float* output.
+try:
+    lib.launch_wmma_kernel.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    lib.launch_wmma_kernel.restype = None
+    HAS_WMMA = True
+except AttributeError:
+    HAS_WMMA = False  # kernels.so built without kernel_wmma.cu
+
 class DesignLimited(RuntimeError):
     """Raised when a kernel cannot run a config by design (not a bug).
 
@@ -409,3 +422,78 @@ def benchmark_kernel_events(impl, Q, K, V, batch_size, N_latent, N_input, D,
         _free_gpu_memory(K_gpu)
         _free_gpu_memory(V_gpu)
         _free_gpu_memory(out_gpu)
+
+
+def benchmark_wmma_events(Q, K, V, batch_size, N_latent, N_input, D,
+                          warmup=20, iters=100):
+    """CUDA-event timing for the fp16 WMMA kernel.
+
+    Takes fp32 Q/K/V (same references the other kernels use), casts to fp16,
+    pre-scales Q by 1/sqrt(D) (the kernel expects pre-scaled Q so the score
+    scaling folds into the load), runs the tensor-core kernel, and returns
+    (fp32 output, mean_ms, std_ms). Requires Nl % 16 == 0 and Ni % 16 == 0.
+    """
+    if not HAS_WMMA:
+        raise RuntimeError("kernels.so has no launch_wmma_kernel (rebuild with "
+                           "kernel_wmma.cu and arch >= sm_70).")
+    if N_latent % 16 or N_input % 16:
+        raise DesignLimited(
+            f"WMMA needs Nl%16==0 and Ni%16==0 (got Nl={N_latent}, Ni={N_input})")
+
+    Q = _prep(Q, batch_size).astype(np.float32) / np.sqrt(D).astype(np.float32)
+    K = _prep(K, batch_size)
+    V = _prep(V, batch_size)
+    Qh = np.ascontiguousarray(Q, dtype=np.float16)
+    Kh = np.ascontiguousarray(K, dtype=np.float16)
+    Vh = np.ascontiguousarray(V, dtype=np.float16)
+
+    Q_size, K_size, V_size = Qh.size * 2, Kh.size * 2, Vh.size * 2  # fp16 = 2 B
+    out_size = batch_size * N_latent * D * 4                         # fp32 out
+
+    Q_gpu = _allocate_gpu_memory(Q_size)
+    K_gpu = _allocate_gpu_memory(K_size)
+    V_gpu = _allocate_gpu_memory(V_size)
+    out_gpu = _allocate_gpu_memory(out_size)
+    start_ev = ctypes.c_void_p(); stop_ev = ctypes.c_void_p()
+    cudart.cudaEventCreate(ctypes.byref(start_ev))
+    cudart.cudaEventCreate(ctypes.byref(stop_ev))
+
+    try:
+        cudart.cudaMemset(out_gpu, 0, out_size)
+        _copy_to_gpu(Qh, Q_gpu, Q_size)
+        _copy_to_gpu(Kh, K_gpu, K_size)
+        _copy_to_gpu(Vh, V_gpu, V_size)
+        op = ctypes.cast(out_gpu, ctypes.POINTER(ctypes.c_float))
+        null_stream = ctypes.c_void_p(0)
+
+        def _launch():
+            lib.launch_wmma_kernel(Q_gpu, K_gpu, V_gpu, op,
+                                   batch_size, N_latent, N_input, D, null_stream)
+
+        for _ in range(warmup):
+            _launch()
+        if cudart.cudaDeviceSynchronize() != 0:
+            raise RuntimeError(
+                f"WMMA kernel failed during warmup (cuda err "
+                f"{cudart.cudaGetLastError()}); Nl={N_latent} Ni={N_input}")
+
+        times = []
+        ms = ctypes.c_float(0.0)
+        for _ in range(iters):
+            cudart.cudaEventRecord(start_ev, null_stream)
+            _launch()
+            cudart.cudaEventRecord(stop_ev, null_stream)
+            cudart.cudaEventSynchronize(stop_ev)
+            cudart.cudaEventElapsedTime(ctypes.byref(ms), start_ev, stop_ev)
+            times.append(ms.value)
+
+        output = np.zeros((batch_size, N_latent, D), dtype=np.float32)
+        _copy_from_gpu(out_gpu, output, out_size)
+        import statistics
+        return output, statistics.mean(times), (
+            statistics.pstdev(times) if len(times) > 1 else 0.0)
+    finally:
+        cudart.cudaEventDestroy(start_ev)
+        cudart.cudaEventDestroy(stop_ev)
+        _free_gpu_memory(Q_gpu); _free_gpu_memory(K_gpu)
+        _free_gpu_memory(V_gpu); _free_gpu_memory(out_gpu)
