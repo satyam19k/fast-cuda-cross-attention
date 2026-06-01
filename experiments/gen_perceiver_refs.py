@@ -5,8 +5,8 @@ Perceiver framing: a FIXED, small bank of latents (the bottleneck) attends to a
 GROWING input. So we fix N_latent small and sweep N_input over image
 resolutions: 784=28^2 (MNIST), 3136=56^2, 12544=112^2, 50176=224^2 (ImageNet).
 
-Reference math is pure torch on CPU (no GPU needed) -- softmax(Q@K^T/sqrt(D))@V
-in fp32, the gate the CUDA kernels are checked against.
+Reference math is pure numpy on CPU (no torch, no GPU needed) --
+softmax(Q@K^T/sqrt(D))@V in fp32, the gate the CUDA kernels are checked against.
 
 Output layout (consumed by bench_perceiver_ni.py):
     <out>/perceiver/Nl{Nl}_Ni{Ni}/{Q,K,V}_matrix.npy, output_reference.npy
@@ -28,27 +28,25 @@ SEED = 42
 
 
 def compute_reference(Q, K, V, D):
-    """softmax(Q @ K^T / sqrt(D)) @ V in fp32. Q,K,V are torch [1,*,D]."""
-    import torch
-    scores = torch.bmm(Q, K.transpose(1, 2)) / np.sqrt(D)
-    attn = torch.softmax(scores, dim=-1)
-    return torch.bmm(attn, V)
+    """softmax(Q @ K^T / sqrt(D)) @ V in fp32. Q [Nl,D], K,V [Ni,D] numpy.
+
+    Pure numpy (no torch) -- the reference is just matmul + softmax, so the GPU
+    box needs only numpy. Numerically-stable softmax (subtract row max).
+    """
+    scores = (Q @ K.T) / np.sqrt(D).astype(np.float32)   # [Nl, Ni]
+    scores = scores - scores.max(axis=1, keepdims=True)
+    e = np.exp(scores)
+    attn = e / e.sum(axis=1, keepdims=True)              # [Nl, Ni]
+    return (attn @ V).astype(np.float32)                 # [Nl, D]
 
 
 def gen_one(Nl, Ni, seed):
-    import torch
     rng = np.random.RandomState(seed)
     Q = rng.randn(Nl, D).astype(np.float32)
     K = rng.randn(Ni, D).astype(np.float32)
     V = rng.randn(Ni, D).astype(np.float32)
-    out = compute_reference(
-        torch.from_numpy(Q).unsqueeze(0),
-        torch.from_numpy(K).unsqueeze(0),
-        torch.from_numpy(V).unsqueeze(0),
-        D,
-    )
-    out_np = out.squeeze(0).numpy().astype(np.float32).reshape(1, Nl, D)
-    return Q, K, V, out_np
+    out = compute_reference(Q, K, V, D)
+    return Q, K, V, out.reshape(1, Nl, D)
 
 
 def main():
