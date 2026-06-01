@@ -53,6 +53,20 @@ try:
     ]
     cudart.cudaDeviceGetAttribute.restype = ctypes.c_int
 
+    # CUDA event API for kernel-only GPU timing (replaces host-side time.time()).
+    cudart.cudaEventCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    cudart.cudaEventCreate.restype = ctypes.c_int
+    cudart.cudaEventRecord.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    cudart.cudaEventRecord.restype = ctypes.c_int
+    cudart.cudaEventSynchronize.argtypes = [ctypes.c_void_p]
+    cudart.cudaEventSynchronize.restype = ctypes.c_int
+    cudart.cudaEventElapsedTime.argtypes = [
+        ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_void_p
+    ]
+    cudart.cudaEventElapsedTime.restype = ctypes.c_int
+    cudart.cudaEventDestroy.argtypes = [ctypes.c_void_p]
+    cudart.cudaEventDestroy.restype = ctypes.c_int
+
     cudaMemcpyHostToDevice = 1
     cudaMemcpyDeviceToHost = 2
     # cudaDevAttrMaxSharedMemoryPerBlockOptin
@@ -291,3 +305,107 @@ def run_vectorized_kernel(Q, K, V, N_latent, N_input, D):
         V = np.expand_dims(V, axis=0).astype(np.float32)
 
     return _run_kernel(lib.launch_optimized_kernel, Q, K, V, batch_size, N_latent, N_input, D)
+
+
+LAUNCHERS = {
+    'naive': lib.launch_naive_kernel,
+    'warp': lib.launch_parallel_kernel,
+    'tiled': lib.launch_tiled_kernel,
+    'vectorized': lib.launch_optimized_kernel,
+}
+
+
+def _prep(arr, batch_size):
+    """Normalize Q/K/V to a contiguous fp32 [batch_size, n, D] array."""
+    arr = np.ascontiguousarray(arr, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = arr[None]
+    if arr.shape[0] == 1 and batch_size > 1:
+        arr = np.repeat(arr, batch_size, axis=0)
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def benchmark_kernel_events(impl, Q, K, V, batch_size, N_latent, N_input, D,
+                            warmup=20, iters=100):
+    """Kernel-only GPU timing via CUDA events.
+
+    Allocates device buffers and copies Q/K/V to the GPU ONCE, then times only
+    the kernel launches with the data resident -- excluding cudaMalloc, the
+    H2D/D2H copies, cudaFree, and Python overhead that dominate the legacy
+    time.time() path. Returns (output, mean_ms, std_ms).
+
+    Raises DesignLimited for the warp kernel when N_input exceeds the device's
+    per-block shared memory.
+    """
+    if impl == 'warp':
+        needed = warp_smem_bytes(N_input)
+        avail = _max_smem_optin()
+        if needed > avail:
+            raise DesignLimited(
+                f"warp needs {needed/1024:.1f} KB shared memory for "
+                f"N_input={N_input}, device allows {avail/1024:.1f} KB/block")
+    launch_fn = LAUNCHERS[impl]
+
+    Q = _prep(Q, batch_size)
+    K = _prep(K, batch_size)
+    V = _prep(V, batch_size)
+
+    Q_size, K_size, V_size = Q.size * 4, K.size * 4, V.size * 4
+    out_size = batch_size * N_latent * D * 4
+
+    Q_gpu = _allocate_gpu_memory(Q_size)
+    K_gpu = _allocate_gpu_memory(K_size)
+    V_gpu = _allocate_gpu_memory(V_size)
+    out_gpu = _allocate_gpu_memory(out_size)
+    start_ev = ctypes.c_void_p()
+    stop_ev = ctypes.c_void_p()
+    cudart.cudaEventCreate(ctypes.byref(start_ev))
+    cudart.cudaEventCreate(ctypes.byref(stop_ev))
+
+    try:
+        cudart.cudaMemset(out_gpu, 0, out_size)
+        _copy_to_gpu(Q, Q_gpu, Q_size)
+        _copy_to_gpu(K, K_gpu, K_size)
+        _copy_to_gpu(V, V_gpu, V_size)
+
+        qp = ctypes.cast(Q_gpu, ctypes.POINTER(ctypes.c_float))
+        kp = ctypes.cast(K_gpu, ctypes.POINTER(ctypes.c_float))
+        vp = ctypes.cast(V_gpu, ctypes.POINTER(ctypes.c_float))
+        op = ctypes.cast(out_gpu, ctypes.POINTER(ctypes.c_float))
+        null_stream = ctypes.c_void_p(0)
+
+        def _launch():
+            launch_fn(qp, kp, vp, op, batch_size, N_latent, N_input, D, null_stream)
+
+        for _ in range(warmup):
+            _launch()
+        if cudart.cudaDeviceSynchronize() != 0:
+            raise RuntimeError(
+                f"kernel '{impl}' failed during warmup (cuda error "
+                f"{cudart.cudaGetLastError()}); likely invalid config for "
+                f"N_input={N_input}, N_latent={N_latent}")
+
+        times = []
+        ms = ctypes.c_float(0.0)
+        for _ in range(iters):
+            cudart.cudaEventRecord(start_ev, null_stream)
+            _launch()
+            cudart.cudaEventRecord(stop_ev, null_stream)
+            cudart.cudaEventSynchronize(stop_ev)
+            cudart.cudaEventElapsedTime(ctypes.byref(ms), start_ev, stop_ev)
+            times.append(ms.value)
+
+        output = np.zeros((batch_size, N_latent, D), dtype=np.float32)
+        _copy_from_gpu(out_gpu, output, out_size)
+
+        import statistics
+        mean_ms = statistics.mean(times)
+        std_ms = statistics.pstdev(times) if len(times) > 1 else 0.0
+        return output, mean_ms, std_ms
+    finally:
+        cudart.cudaEventDestroy(start_ev)
+        cudart.cudaEventDestroy(stop_ev)
+        _free_gpu_memory(Q_gpu)
+        _free_gpu_memory(K_gpu)
+        _free_gpu_memory(V_gpu)
+        _free_gpu_memory(out_gpu)
