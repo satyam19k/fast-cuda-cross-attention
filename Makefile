@@ -4,7 +4,7 @@ NVCC = nvcc
 NVCC_FLAGS = -O3 -Xcompiler -fPIC -shared --compiler-options '-fPIC'
 
 
-KERNEL_SOURCES = kernel_naive.cu kernel_warp_parallel.cu kernel_tiled.cu kernel_vectorized.cu kernel_wmma.cu
+KERNEL_SOURCES = kernel_naive.cu kernel_warp_parallel.cu kernel_tiled.cu kernel_vectorized.cu kernel_wmma.cu kernel_splitk.cu
 
 TARGET = kernels.so
 

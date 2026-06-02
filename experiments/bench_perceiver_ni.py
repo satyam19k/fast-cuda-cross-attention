@@ -61,11 +61,12 @@ def main():
     import numpy as np
     import roofline
     import csvlog
-    from gpu_specs import detect_gpu_name, raw_gpu_name
+    from gpu_specs import detect_gpu_name, raw_gpu_name, GPU_SPECS
     try:
         import cuda_wrappers
         from cuda_wrappers import (benchmark_kernel_events,
-                                   benchmark_wmma_events, DesignLimited)
+                                   benchmark_wmma_events,
+                                   benchmark_splitk_events, DesignLimited)
     except Exception as e:
         print(f"Could not load CUDA kernels ({e}).")
         print("Build them first on the GPU box:  make")
@@ -75,6 +76,7 @@ def main():
     # GPU_SPECS key for %-peak math; if the card is unknown we still record its
     # raw name so the CSV is labeled.
     gpu = detect_gpu_name() or raw_gpu_name() or "unknown"
+    sm_count = GPU_SPECS.get(gpu, {}).get("sm_count", 142)
 
     nl, B = args.n_latent, args.batch
     csv_path = os.path.join(ROOT, args.csv)
@@ -112,6 +114,11 @@ def main():
                 if impl == "wmma":
                     out, mean_ms, std_ms = benchmark_wmma_events(
                         Q, K, V, B, nl, ni, D, args.warmup, args.iters)
+                elif impl == "splitk":
+                    out, mean_ms, std_ms, nsplits = benchmark_splitk_events(
+                        Q, K, V, B, nl, ni, D, args.warmup, args.iters,
+                        sm_count=sm_count)
+                    row["note"] = f"splits={nsplits}"
                 else:
                     out, mean_ms, std_ms = benchmark_kernel_events(
                         impl, Q, K, V, B, nl, ni, D, args.warmup, args.iters)
