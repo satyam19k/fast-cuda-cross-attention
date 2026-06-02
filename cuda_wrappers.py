@@ -160,6 +160,20 @@ try:
 except AttributeError:
     HAS_SPLITK = False  # kernels.so built without kernel_splitk.cu
 
+# Tensor-core split-K: half Q/K/V (void*) + float out/po/pm/pl + num_splits.
+try:
+    lib.launch_wmma_splitk_kernel.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    lib.launch_wmma_splitk_kernel.restype = None
+    HAS_WMMA_SPLITK = True
+except AttributeError:
+    HAS_WMMA_SPLITK = False
+
 class DesignLimited(RuntimeError):
     """Raised when a kernel cannot run a config by design (not a bug).
 
@@ -439,14 +453,16 @@ def benchmark_kernel_events(impl, Q, K, V, batch_size, N_latent, N_input, D,
         _free_gpu_memory(out_gpu)
 
 
-def choose_num_splits(N_latent, N_input, batch_size, sm_count=142):
+def choose_num_splits(N_latent, N_input, batch_size, sm_count=142,
+                      latents_per_block=4):
     """Pick num_splits so the partial-kernel grid oversubscribes the GPU.
 
-    Base blocks (no split) = ceil(Nl/4)*batch. Aim for ~4x sm_count blocks,
-    capped so each split still holds >= ~16 keys.
+    Base blocks (no split) = ceil(Nl/latents_per_block)*batch. Aim for ~4x
+    sm_count blocks, capped so each split still holds >= ~16 keys.
+    latents_per_block: 4 for the float4 split-K, 16 for the WMMA split-K.
     """
     import math
-    base = math.ceil(N_latent / 4) * batch_size
+    base = math.ceil(N_latent / latents_per_block) * batch_size
     target = max(1, (4 * sm_count) // max(1, base))
     return max(1, min(N_input // 16, target)) or 1
 
@@ -496,6 +512,87 @@ def benchmark_splitk_events(Q, K, V, batch_size, N_latent, N_input, D,
         if cudart.cudaDeviceSynchronize() != 0:
             raise RuntimeError(
                 f"split-K failed during warmup (cuda err "
+                f"{cudart.cudaGetLastError()}); Nl={N_latent} Ni={N_input} "
+                f"splits={num_splits}")
+
+        times = []; ms = ctypes.c_float(0.0)
+        for _ in range(iters):
+            cudart.cudaEventRecord(start_ev, null_stream)
+            _launch()
+            cudart.cudaEventRecord(stop_ev, null_stream)
+            cudart.cudaEventSynchronize(stop_ev)
+            cudart.cudaEventElapsedTime(ctypes.byref(ms), start_ev, stop_ev)
+            times.append(ms.value)
+
+        output = np.zeros((batch_size, N_latent, D), dtype=np.float32)
+        _copy_from_gpu(out_gpu, output, out_size)
+        import statistics
+        return (output, statistics.mean(times),
+                (statistics.pstdev(times) if len(times) > 1 else 0.0), num_splits)
+    finally:
+        cudart.cudaEventDestroy(start_ev); cudart.cudaEventDestroy(stop_ev)
+        for p in (Q_gpu, K_gpu, V_gpu, out_gpu, po_gpu, pm_gpu, pl_gpu):
+            _free_gpu_memory(p)
+
+
+def benchmark_wmma_splitk_events(Q, K, V, batch_size, N_latent, N_input, D,
+                                 warmup=20, iters=100, num_splits=None,
+                                 sm_count=142):
+    """CUDA-event timing for the tensor-core split-K kernel (fp16 + key-split).
+
+    fp16 Q/K/V (Q pre-scaled by 1/sqrt(D)), fp32 scratch + output. Requires
+    Nl%16==0 and Ni%16==0. Returns (fp32 output, mean_ms, std_ms, num_splits).
+    """
+    if not HAS_WMMA_SPLITK:
+        raise RuntimeError("kernels.so has no launch_wmma_splitk_kernel "
+                           "(rebuild with kernel_wmma_splitk.cu).")
+    if N_latent % 16 or N_input % 16:
+        raise DesignLimited(
+            f"WMMA split-K needs Nl%16==0 and Ni%16==0 "
+            f"(got Nl={N_latent}, Ni={N_input})")
+    if num_splits is None:
+        num_splits = choose_num_splits(N_latent, N_input, batch_size, sm_count,
+                                       latents_per_block=16)
+
+    Q = _prep(Q, batch_size).astype(np.float32) / np.sqrt(D).astype(np.float32)
+    K = _prep(K, batch_size); V = _prep(V, batch_size)
+    Qh = np.ascontiguousarray(Q, dtype=np.float16)
+    Kh = np.ascontiguousarray(K, dtype=np.float16)
+    Vh = np.ascontiguousarray(V, dtype=np.float16)
+
+    out_size = batch_size * N_latent * D * 4
+    po_size = batch_size * N_latent * num_splits * D * 4
+    pml_size = batch_size * N_latent * num_splits * 4
+
+    Q_gpu = _allocate_gpu_memory(Qh.size * 2)
+    K_gpu = _allocate_gpu_memory(Kh.size * 2)
+    V_gpu = _allocate_gpu_memory(Vh.size * 2)
+    out_gpu = _allocate_gpu_memory(out_size)
+    po_gpu = _allocate_gpu_memory(po_size)
+    pm_gpu = _allocate_gpu_memory(pml_size); pl_gpu = _allocate_gpu_memory(pml_size)
+    start_ev = ctypes.c_void_p(); stop_ev = ctypes.c_void_p()
+    cudart.cudaEventCreate(ctypes.byref(start_ev))
+    cudart.cudaEventCreate(ctypes.byref(stop_ev))
+
+    try:
+        cudart.cudaMemset(out_gpu, 0, out_size)
+        _copy_to_gpu(Qh, Q_gpu, Qh.size * 2)
+        _copy_to_gpu(Kh, K_gpu, Kh.size * 2)
+        _copy_to_gpu(Vh, V_gpu, Vh.size * 2)
+        fp = lambda p: ctypes.cast(p, ctypes.POINTER(ctypes.c_float))
+        null_stream = ctypes.c_void_p(0)
+
+        def _launch():
+            lib.launch_wmma_splitk_kernel(
+                Q_gpu, K_gpu, V_gpu, fp(out_gpu),
+                fp(po_gpu), fp(pm_gpu), fp(pl_gpu),
+                batch_size, N_latent, N_input, D, num_splits, null_stream)
+
+        for _ in range(warmup):
+            _launch()
+        if cudart.cudaDeviceSynchronize() != 0:
+            raise RuntimeError(
+                f"WMMA split-K failed during warmup (cuda err "
                 f"{cudart.cudaGetLastError()}); Nl={N_latent} Ni={N_input} "
                 f"splits={num_splits}")
 

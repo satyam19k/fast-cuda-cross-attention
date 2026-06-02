@@ -37,11 +37,14 @@ plt.rcParams.update({
 })
 
 COLORS = {"warp": "#1f77b4", "tiled": "#2ca02c", "vectorized": "#7a2fbf",
-          "naive": "#d62728", "wmma": "#ff7f0e", "splitk": "#000000"}
+          "naive": "#d62728", "wmma": "#ff7f0e", "splitk": "#000000",
+          "wmma_splitk": "#e377c2"}
 MARKERS = {"warp": "s", "tiled": "^", "vectorized": "D", "naive": "o",
-           "wmma": "P", "splitk": "*"}
+           "wmma": "P", "splitk": "*", "wmma_splitk": "X"}
 LABELS = {"warp": "Warp parallel", "tiled": "Tiled", "vectorized": "Vectorized",
-          "naive": "Naive", "wmma": "WMMA fp16", "splitk": "Split-K (key-parallel)"}
+          "naive": "Naive", "wmma": "WMMA fp16",
+          "splitk": "Split-K (key-parallel)",
+          "wmma_splitk": "Tensor-core split-K"}
 # L2 cache size per card (MB) -- for the capacity-crossover marker.
 L2_MB = {"4070": 36, "L40": 96, "L40S": 96, "H200": 50}
 

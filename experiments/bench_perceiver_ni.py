@@ -66,7 +66,8 @@ def main():
         import cuda_wrappers
         from cuda_wrappers import (benchmark_kernel_events,
                                    benchmark_wmma_events,
-                                   benchmark_splitk_events, DesignLimited)
+                                   benchmark_splitk_events,
+                                   benchmark_wmma_splitk_events, DesignLimited)
     except Exception as e:
         print(f"Could not load CUDA kernels ({e}).")
         print("Build them first on the GPU box:  make")
@@ -105,7 +106,7 @@ def main():
         res_s = f"{res}^2" if res * res == ni else ""
 
         for impl in args.impls:
-            prec = "fp16" if impl == "wmma" else "fp32"
+            prec = "fp16" if impl in ("wmma", "wmma_splitk") else "fp32"
             row = {
                 "experiment": "perceiver_ni", "gpu": gpu, "impl": impl,
                 "precision": prec, "B": B, "N_latent": nl, "N_input": ni, "D": D,
@@ -116,6 +117,11 @@ def main():
                         Q, K, V, B, nl, ni, D, args.warmup, args.iters)
                 elif impl == "splitk":
                     out, mean_ms, std_ms, nsplits = benchmark_splitk_events(
+                        Q, K, V, B, nl, ni, D, args.warmup, args.iters,
+                        sm_count=sm_count)
+                    row["note"] = f"splits={nsplits}"
+                elif impl == "wmma_splitk":
+                    out, mean_ms, std_ms, nsplits = benchmark_wmma_splitk_events(
                         Q, K, V, B, nl, ni, D, args.warmup, args.iters,
                         sm_count=sm_count)
                     row["note"] = f"splits={nsplits}"
