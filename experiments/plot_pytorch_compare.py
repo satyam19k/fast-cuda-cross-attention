@@ -184,6 +184,36 @@ def plot_slowdown(by_impl, impls, nis, meta, outdir):
     return p
 
 
+def plot_bytes(nl, ni, D, outdir):
+    """The 'S is cheap' figure for the theorem slide: K, V, and the score
+    matrix S in bytes. S = Nl*Ni vs K = Ni*D, so S/K = Nl/D -- the matrix
+    FlashAttention works to avoid is nearly free when Nl << Ni."""
+    K = ni * D * 4 / 1e6
+    V = ni * D * 4 / 1e6
+    S = nl * ni * 4 / 1e6  # materialized score matrix (fp32)
+    ratio = nl / D  # S / K
+    fig, ax = plt.subplots(figsize=(7, 5))
+    bars = ax.bar(["K\n(Ni×D)", "V\n(Ni×D)", "S = QKᵀ\n(Nl×Ni)"],
+                  [K, V, S], color=["#1f77b4", "#2ca02c", "#d62728"],
+                  width=0.6, edgecolor="black", linewidth=0.6)
+    for b, v in zip(bars, [K, V, S]):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.0f} MB",
+                ha="center", va="bottom", fontsize=11)
+    ax.set_ylabel("Bytes (MB, fp32)")
+    ax.set_title("Why materializing S is affordable when Nl ≪ Ni")
+    ax.text(0.5, 1.02, f"Nl={nl}, Ni={ni}, D={D}   ·   S/K = Nl/D = {ratio*100:.0f}%",
+            transform=ax.transAxes, ha="center", fontsize=10, color="0.35")
+    ax.text(0.97, 0.97,
+            f"S is only {ratio*100:.0f}% of K's bytes\n"
+            f"(8% at Nl=64, →0 as Nl shrinks).\n"
+            f"The matrix FlashAttention avoids\nis nearly free in this regime.",
+            transform=ax.transAxes, ha="right", va="top", fontsize=10.5,
+            color="0.15", bbox=dict(boxstyle="round", fc="#f4f4f4", ec="0.7"))
+    p = os.path.join(outdir, "why_materialize_bytes.png")
+    fig.savefig(p); plt.close(fig)
+    return p
+
+
 def main():
     ap = argparse.ArgumentParser(description="Plot my best kernel vs PyTorch SDPA")
     ap.add_argument("--csv", default="results/ni_nl256.csv")
@@ -192,6 +222,9 @@ def main():
     ap.add_argument("--baselines", nargs="+", default=DEFAULT_BASELINES)
     ap.add_argument("--anchor", type=int, default=4096,
                     help="Ni for the bar-chart punchline slide")
+    ap.add_argument("--bytes-nl", type=int, default=64,
+                    help="Nl for the 'S is cheap' bytes figure (use small Nl)")
+    ap.add_argument("--bytes-ni", type=int, default=50176)
     args = ap.parse_args()
 
     if not os.path.exists(args.csv):
@@ -210,6 +243,7 @@ def main():
         plot_latency(by_impl, present, nis, meta, args.outdir),
         plot_bar(by_impl, present, args.anchor, meta, args.outdir),
         plot_slowdown(by_impl, present, nis, meta, args.outdir),
+        plot_bytes(args.bytes_nl, args.bytes_ni, 768, args.outdir),
     ]
     print("Wrote:")
     for p in made:
