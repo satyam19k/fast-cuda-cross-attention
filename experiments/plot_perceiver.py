@@ -38,13 +38,19 @@ plt.rcParams.update({
 
 COLORS = {"warp": "#1f77b4", "tiled": "#2ca02c", "vectorized": "#7a2fbf",
           "naive": "#d62728", "wmma": "#ff7f0e", "splitk": "#000000",
-          "wmma_splitk": "#e377c2"}
+          "wmma_splitk": "#e377c2",
+          "sdpa_math": "#8c564b", "sdpa_math16": "#c49c94",
+          "sdpa_eff": "#17becf", "sdpa_eff16": "#9edae5"}
 MARKERS = {"warp": "s", "tiled": "^", "vectorized": "D", "naive": "o",
-           "wmma": "P", "splitk": "*", "wmma_splitk": "X"}
+           "wmma": "P", "splitk": "*", "wmma_splitk": "X",
+           "sdpa_math": "v", "sdpa_math16": "v",
+           "sdpa_eff": "<", "sdpa_eff16": "<"}
 LABELS = {"warp": "Warp parallel", "tiled": "Tiled", "vectorized": "Vectorized",
           "naive": "Naive", "wmma": "WMMA fp16",
           "splitk": "Split-K (key-parallel)",
-          "wmma_splitk": "Tensor-core split-K"}
+          "wmma_splitk": "Tensor-core split-K",
+          "sdpa_math": "PyTorch SDPA-math", "sdpa_math16": "PyTorch SDPA-math fp16",
+          "sdpa_eff": "PyTorch SDPA-efficient", "sdpa_eff16": "PyTorch SDPA-eff fp16"}
 # L2 cache size per card (MB) -- for the capacity-crossover marker.
 L2_MB = {"4070": 36, "L40": 96, "L40S": 96, "H200": 50}
 

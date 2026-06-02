@@ -61,6 +61,7 @@ def main():
     import numpy as np
     import roofline
     import csvlog
+    from sdpa_bench import benchmark_sdpa_events
     from gpu_specs import detect_gpu_name, raw_gpu_name, GPU_SPECS
     try:
         import cuda_wrappers
@@ -106,7 +107,12 @@ def main():
         res_s = f"{res}^2" if res * res == ni else ""
 
         for impl in args.impls:
-            prec = "fp16" if impl in ("wmma", "wmma_splitk") else "fp32"
+            if impl in ("wmma", "wmma_splitk") or impl.endswith("16"):
+                prec = "fp16"
+            else:
+                prec = "fp32"
+            is_sdpa = impl.startswith("sdpa")
+            materialized = is_sdpa and "math" in impl
             row = {
                 "experiment": "perceiver_ni", "gpu": gpu, "impl": impl,
                 "precision": prec, "B": B, "N_latent": nl, "N_input": ni, "D": D,
@@ -125,6 +131,13 @@ def main():
                         Q, K, V, B, nl, ni, D, args.warmup, args.iters,
                         sm_count=sm_count)
                     row["note"] = f"splits={nsplits}"
+                elif is_sdpa:
+                    backend = ("math" if "math" in impl else
+                               "efficient" if "eff" in impl else "flash")
+                    out, mean_ms, std_ms = benchmark_sdpa_events(
+                        Q, K, V, B, nl, ni, D, backend, prec,
+                        args.warmup, args.iters)
+                    row["note"] = f"{backend}/{prec}"
                 else:
                     out, mean_ms, std_ms = benchmark_kernel_events(
                         impl, Q, K, V, B, nl, ni, D, args.warmup, args.iters)
@@ -134,7 +147,7 @@ def main():
                 max_abs = float(np.max(np.abs(o0 - r0)))
                 rel = max_abs / (float(np.max(np.abs(r0))) + 1e-6)
                 rl = roofline.roofline_row(B, nl, ni, D, mean_ms / 1e3, gpu,
-                                           prec, materialized=False)
+                                           prec, materialized=materialized)
                 status = "ok" if max_abs <= args.tol else "ACCURACY?"
                 if impl == "warp":
                     warp_lat[ni] = mean_ms
