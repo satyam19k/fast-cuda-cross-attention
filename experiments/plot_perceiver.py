@@ -278,14 +278,19 @@ def main():
     ap = argparse.ArgumentParser(description="Plot the Perceiver Ni-sweep")
     ap.add_argument("--csv", default="results/perceiver_ni.csv")
     ap.add_argument("--outdir", default="results")
+    ap.add_argument("--impls", nargs="+", default=None,
+                    help="only plot these impls (e.g. warp tiled vectorized "
+                         "splitk) -- keeps slide figures uncluttered")
     args = ap.parse_args()
 
     if not os.path.exists(args.csv):
         print(f"No CSV at {args.csv}. Run bench_perceiver_ni.py first.")
         return
     by_impl, meta = load(args.csv)
+    if args.impls:
+        by_impl = {k: v for k, v in by_impl.items() if k in args.impls}
     if not by_impl:
-        print("No perceiver_ni rows in CSV.")
+        print("No matching perceiver_ni rows in CSV.")
         return
     nis = sorted({n for rows in by_impl.values() for n in rows})
     os.makedirs(args.outdir, exist_ok=True)
