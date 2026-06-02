@@ -1,0 +1,48 @@
+% comparison_table.tex
+% The punchline table: my best kernel vs PyTorch's eligible SDPA backends.
+%
+% Compile standalone:   pdflatex comparison_table.tex   -> comparison_table.pdf
+% Or drop into Beamer:  copy the tabular block between BEGIN/END TABULAR into a
+%                       \begin{frame}; the preamble packages below are the only
+%                       deps (booktabs, xcolor[table]).
+%
+% Numbers are the measured anchor point (Nl=256, Ni=4096, head_dim=768, L40S,
+% fp32). Edit the rows to match your latest run.
+
+\documentclass[border=8pt,varwidth]{standalone}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\usepackage{array}
+
+\definecolor{minerow}{HTML}{FFF3CD}   % highlight: my kernel
+\definecolor{winrow}{HTML}{D4EDDA}    % highlight: the backend to beat
+
+\begin{document}
+\renewcommand{\arraystretch}{1.25}
+\setlength{\tabcolsep}{8pt}
+
+% ---------------- BEGIN TABULAR (paste this block into Beamer) ----------------
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+\textbf{Implementation} & \textbf{Type} & \textbf{Latency} & \textbf{GFLOP/s}
+  & \textbf{$\times$ SDPA-math} \\
+                        &               & \textbf{(ms)}    &
+  &                            \\
+\midrule
+\rowcolor{winrow}
+PyTorch SDPA-math       & materialized (cuBLAS) & 0.168 & 19184 & 1.0  \\
+PyTorch SDPA-math fp16  & materialized          & 0.196 & 16469 & 1.2  \\
+\rowcolor{minerow}
+\textbf{Split-K (ours)} & fused, key-parallel   & 0.729 & \phantom{0}4419 & 4.3  \\
+PyTorch SDPA-efficient  & fused                 & 1.561 & \phantom{0}2064 & 9.3  \\
+Vectorized (ours)       & fused                 & 2.666 & \phantom{0}1208 & 15.9 \\
+\bottomrule
+\end{tabular}
+% ----------------- END TABULAR -----------------
+
+\\[6pt]
+{\footnotesize Anchor: $N_\ell{=}256$, $N_i{=}4096$, head\_dim${=}768$, L40S, fp32.
+Flash \& cuDNN are ineligible at $d{=}768$. \\
+Materialized cuBLAS wins; our key-parallel kernel beats PyTorch's \emph{fused}
+backend ($2.1\times$) but trails its \emph{materialized} one ($4.3\times$).}
+\end{document}
