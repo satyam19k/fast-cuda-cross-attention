@@ -62,8 +62,6 @@ __global__ void wmma_splitk_partial(
     __shared__ float row_max[WM];
     __shared__ float row_sum[WM];
 
-    long pidx_row = ((long)batch * N_latent + m0) * num_splits + split;  // for r=0
-
     if (k0 >= N_input) {                              // empty split
         if (lane < WM && (m0 + lane) < N_latent) {
             long p = ((long)batch * N_latent + m0 + lane) * num_splits + split;
