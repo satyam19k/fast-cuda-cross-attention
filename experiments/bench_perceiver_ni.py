@@ -64,7 +64,8 @@ def main():
     from gpu_specs import detect_gpu_name, raw_gpu_name
     try:
         import cuda_wrappers
-        from cuda_wrappers import benchmark_kernel_events, DesignLimited
+        from cuda_wrappers import (benchmark_kernel_events,
+                                   benchmark_wmma_events, DesignLimited)
     except Exception as e:
         print(f"Could not load CUDA kernels ({e}).")
         print("Build them first on the GPU box:  make")
@@ -102,20 +103,25 @@ def main():
         res_s = f"{res}^2" if res * res == ni else ""
 
         for impl in args.impls:
+            prec = "fp16" if impl == "wmma" else "fp32"
             row = {
                 "experiment": "perceiver_ni", "gpu": gpu, "impl": impl,
-                "precision": "fp32", "B": B, "N_latent": nl, "N_input": ni, "D": D,
+                "precision": prec, "B": B, "N_latent": nl, "N_input": ni, "D": D,
             }
             try:
-                out, mean_ms, std_ms = benchmark_kernel_events(
-                    impl, Q, K, V, B, nl, ni, D, args.warmup, args.iters)
+                if impl == "wmma":
+                    out, mean_ms, std_ms = benchmark_wmma_events(
+                        Q, K, V, B, nl, ni, D, args.warmup, args.iters)
+                else:
+                    out, mean_ms, std_ms = benchmark_kernel_events(
+                        impl, Q, K, V, B, nl, ni, D, args.warmup, args.iters)
                 # correctness vs fp32 reference (compare batch 0)
                 o0 = out[0] if out.ndim == 3 else out
                 r0 = ref.reshape(nl, D)
                 max_abs = float(np.max(np.abs(o0 - r0)))
                 rel = max_abs / (float(np.max(np.abs(r0))) + 1e-6)
                 rl = roofline.roofline_row(B, nl, ni, D, mean_ms / 1e3, gpu,
-                                           "fp32", materialized=False)
+                                           prec, materialized=False)
                 status = "ok" if max_abs <= args.tol else "ACCURACY?"
                 if impl == "warp":
                     warp_lat[ni] = mean_ms

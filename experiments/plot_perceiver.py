@@ -37,10 +37,11 @@ plt.rcParams.update({
 })
 
 COLORS = {"warp": "#1f77b4", "tiled": "#2ca02c", "vectorized": "#7a2fbf",
-          "naive": "#d62728"}
-MARKERS = {"warp": "s", "tiled": "^", "vectorized": "D", "naive": "o"}
+          "naive": "#d62728", "wmma": "#ff7f0e"}
+MARKERS = {"warp": "s", "tiled": "^", "vectorized": "D", "naive": "o",
+           "wmma": "P"}
 LABELS = {"warp": "Warp parallel", "tiled": "Tiled", "vectorized": "Vectorized",
-          "naive": "Naive"}
+          "naive": "Naive", "wmma": "WMMA fp16"}
 # L2 cache size per card (MB) -- for the capacity-crossover marker.
 L2_MB = {"4070": 36, "L40": 96, "L40S": 96, "H200": 50}
 
@@ -231,7 +232,11 @@ def plot_roofline(by_impl, nis, meta, outdir):
         ax.plot(ais, roof, color="0.25", lw=2,
                 label=f"{gpu} fp32 roofline")
         ax.axhline(peak_c, color="0.55", ls="--", lw=1,
-                   label=f"compute peak {peak_c/1e3:.0f} TFLOP/s")
+                   label=f"fp32 compute peak {peak_c/1e3:.0f} TFLOP/s")
+        peak_fp16 = spec.get("peak_fp16_tc_flops")
+        if peak_fp16:
+            ax.axhline(peak_fp16 / 1e9, color="#ff7f0e", ls="--", lw=1,
+                       label=f"fp16 TC peak {peak_fp16/1e12:.0f} TFLOP/s")
         ridge = peak_c * 1e9 / peak_bw
         ax.axvline(ridge, color="0.7", ls=":", lw=1)
         ax.text(ridge, peak_c, f" ridge {ridge:.0f}", color="0.4",
